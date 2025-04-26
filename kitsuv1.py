@@ -1,23 +1,32 @@
-from easy_pil import Editor, Font, Canvas
-from PIL import Image, ImageEnhance, ImageFilter, ImageDraw, ImageFont
+from easy_pil import Editor, Font
+from PIL import Image, ImageFilter
 import requests
 import io
-import json
 
-# Configuration (ajustée pour des étiquettes plus grandes et style AniList)
-IMAGE_SIZE = (1200, 628)
-TITLE_FONT_SIZE = 70
-YEAR_FONT_SIZE = 30
-FONT_PATH = "arial.ttf"
-OPACITY = 0.8
-OVERLAY_COLOR = (50, 50, 50)
-BLUR_RADIUS = 5
-LOGO_HEIGHT = 628
-LOGO_MARGIN = 0
-YEAR_SPACING = 5
-MAX_CHARS_PER_LINE = 20
+# --- CONFIGURATION --- #
 
-# Fonctions utilitaires (inchangées)
+CONFIG = {
+    "image_size": (1200, 628),
+    "font_path": "arial.ttf",
+    "title_font_size": 70,
+    "year_font_size": 30,
+    "description_font_size": 26,
+    "genre_font_size": 30,
+    "max_title_chars": 20,
+    "max_description_chars": 300,
+    "description_line_wrap": 50,
+    "overlay_color": (0, 0, 0),
+    "overlay_opacity": 0.9,
+    "blur_radius": 5,
+    "logo_margin": 0,
+    "genre_max_per_line": 3,
+    "genre_rect_height": 40,
+    "genre_spacing": 8,
+    "genre_radius": 22,
+}
+
+# --- OUTILS --- #
+
 def get_anime_data(anime_id):
     url = f"https://kitsu.io/api/edge/anime/{anime_id}?include=categories,animeProductions.producer"
     headers = {"Accept": "application/vnd.api+json"}
@@ -34,11 +43,10 @@ def download_image(url):
     else:
         raise Exception(f"Erreur téléchargement image: {response.status_code}")
 
-def wrap_text_manual(text, max_chars):
+def wrap_text(text, max_chars):
     words = text.split()
     lines = []
     current_line = ""
-    
     for word in words:
         if len(current_line) + len(word) + 1 <= max_chars:
             current_line += word + " "
@@ -48,178 +56,133 @@ def wrap_text_manual(text, max_chars):
             current_line = word + " "
     if current_line:
         lines.append(current_line.strip())
-    
     return lines
 
+# --- BANNIERE --- #
+
 def generate_banner(anime_id):
-    # Récupérer les données de l'anime
-    anime_data = get_anime_data(anime_id)
-    
-    # Récupérer les titres disponibles
-    titles = anime_data["data"]["attributes"].get("titles", {})
-    canonical_title = anime_data["data"]["attributes"]["canonicalTitle"]
-    
-    # Vérifier les titres anglophones (en ou en_us)
-    en_title = titles.get("en") or titles.get("en_us") or None
-    
-    # Choisir le titre le plus court
-    if en_title and len(en_title) < len(canonical_title):
-        title = en_title
-    else:
-        title = canonical_title
-    start_date = anime_data["data"]["attributes"].get("startDate", "N/A")
-    episode_count = anime_data["data"]["attributes"].get("episodeCount", "N/A")  
+    data = get_anime_data(anime_id)
+
+    attributes = data["data"]["attributes"]
+    titles = attributes.get("titles", {})
+    canonical_title = attributes.get("canonicalTitle", "Unknown Title")
+    en_title = titles.get("en") or titles.get("en_us")
+
+    title = en_title if en_title and len(en_title) < len(canonical_title) else canonical_title
+    start_date = attributes.get("startDate", "N/A")
     year = start_date.split("-")[0] if start_date != "N/A" else "N/A"
-    cover_url = anime_data["data"]["attributes"].get("coverImage", {}).get("original") or \
-                anime_data["data"]["attributes"]["posterImage"]["original"]
-    logo_url = anime_data["data"]["attributes"]["posterImage"]["original"]
+    episode_count = attributes.get("episodeCount", "N/A")
+    description_raw = attributes.get("description", "Aucune description disponible.")
+    cover_url = attributes.get("coverImage", {}).get("original") or attributes["posterImage"]["original"]
+    logo_url = attributes["posterImage"]["original"]
 
-    # Récupérer les genres à partir de la section "included"
-    genres = []
-    if "included" in anime_data:
-        for item in anime_data["included"]:
-            if item["type"] == "categories":
-                genre_title = item["attributes"].get("title")
-                if genre_title:
-                    genres.append(genre_title)
-    
-    # Limiter à 3 genres pour éviter un débordement
-    genres = genres[:3]
+    genres = [item["attributes"]["title"]
+              for item in data.get("included", [])
+              if item["type"] == "categories"]
 
-    # Télécharger et préparer l'image de fond
-    background = download_image(cover_url)
-    background = background.convert("RGBA")
+    # --- Fond --- #
 
-    # Redimensionner proportionnellement pour couvrir IMAGE_SIZE
-    bg_width, bg_height = background.size
-    target_width, target_height = IMAGE_SIZE
-    ratio = max(target_width / bg_width, target_height / bg_height)
-    new_width = int(bg_width * ratio)
-    new_height = int(bg_height * ratio)
-    background = background.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    background = download_image(cover_url).convert("RGBA")
 
-    # Recadrer au centre pour obtenir exactement IMAGE_SIZE
-    left = (new_width - target_width) // 2
-    top = (new_height - target_height) // 2
-    right = left + target_width
-    bottom = top + target_height
-    background = background.crop((left, top, right, bottom))
+    bg_w, bg_h = background.size
+    target_w, target_h = CONFIG["image_size"]
+    ratio = max(target_w / bg_w, target_h / bg_h)
+    new_size = (int(bg_w * ratio), int(bg_h * ratio))
+    background = background.resize(new_size, Image.Resampling.LANCZOS)
 
-    # Appliquer un flou
-    background = background.filter(ImageFilter.GaussianBlur(BLUR_RADIUS))
+    left = (background.width - target_w) // 2
+    top = (background.height - target_h) // 2
+    background = background.crop((left, top, left + target_w, top + target_h))
 
-    # Créer un overlay gris foncé semi-transparent
-    overlay = Image.new("RGBA", IMAGE_SIZE, (*OVERLAY_COLOR, int(255 * OPACITY)))
+    background = background.filter(ImageFilter.GaussianBlur(CONFIG["blur_radius"]))
+    overlay = Image.new("RGBA", CONFIG["image_size"],
+                        (*CONFIG["overlay_color"], int(255 * CONFIG["overlay_opacity"])))
     background = Image.alpha_composite(background, overlay)
 
-    # Télécharger et préparer le logo
-    logo = download_image(logo_url)
-    logo = logo.convert("RGBA")
+    # --- Logo --- #
 
-    # Redimensionner le logo en respectant les proportions
+    logo = download_image(logo_url).convert("RGBA")
     logo_ratio = logo.width / logo.height
-    logo_width = int(LOGO_HEIGHT * logo_ratio)
-    logo = logo.resize((logo_width, LOGO_HEIGHT), Image.Resampling.LANCZOS)
+    logo_height = CONFIG["image_size"][1]
+    logo_width = int(logo_ratio * logo_height)
+    logo = logo.resize((logo_width, logo_height), Image.Resampling.LANCZOS)
 
-    # Créer une nouvelle image pour combiner fond et logo
-    final_image = Image.new("RGBA", IMAGE_SIZE)
-    final_image.paste(background, (0, 0))
+    # --- Préparer l'image finale --- #
 
-    # Positionner le logo à droite avec une marge
-    logo_x = IMAGE_SIZE[0] - logo_width - LOGO_MARGIN
-    logo_y = (IMAGE_SIZE[1] - LOGO_HEIGHT) // 2
-    final_image.paste(logo, (logo_x, logo_y), logo)
+    final = Image.new("RGBA", CONFIG["image_size"])
+    final.paste(background, (0, 0))
 
-    # Convertir en RGB pour easy-pil
-    final_image = final_image.convert("RGB")
+    logo_x = CONFIG["image_size"][0] - logo_width - CONFIG["logo_margin"]
+    logo_y = (CONFIG["image_size"][1] - logo_height) // 2
+    final.paste(logo, (logo_x, logo_y), logo)
 
-    # Créer l'éditeur avec easy-pil
-    editor = Editor(final_image)
+    editor = Editor(final.convert("RGB"))
 
-    # Diviser le titre en lignes
-    title_lines = wrap_text_manual(title, MAX_CHARS_PER_LINE)
+    # --- Texte --- #
 
-    # Ajouter l'année
-    font_year = Font.poppins(size=YEAR_FONT_SIZE, variant="bold")
-    year_position = (60, 80)
-    editor.text(
-        year_position,
-        year,
-        font=font_year,
-        color="white",
-        align="left"
-    )
+    font_title = Font.poppins(size=CONFIG["title_font_size"], variant="bold")
+    font_year = Font.poppins(size=CONFIG["year_font_size"], variant="bold")
+    font_desc = Font.poppins(size=CONFIG["description_font_size"], variant="light")
+    font_genre = Font.poppins(size=CONFIG["genre_font_size"], variant="light")
 
-    # Ajouter le titre ligne par ligne
-    font_title = Font.poppins(size=TITLE_FONT_SIZE, variant="bold")
-    title_y = 120
-    line_spacing = TITLE_FONT_SIZE * 1.2
-    for line in title_lines:
-        editor.text(
-            (60, title_y),
-            line,
-            font=font_title,
-            color="white",
-            align="left"
-        )
-        title_y += line_spacing
-    
-    # Ajouter le nombre d'épisodes sous l'année
-    episode_text = f"{episode_count} ep." if episode_count != "N/A" else "N/A ep."
-    editor.text(
-        (60, title_y + 20),
-        episode_text,
-        font=font_year,
-        color="white",
-        align="left"
-    )
-    
-    # Ajouter les genres en bas à gauche, alignés horizontalement
-    genre_x = 60  # Marge à gauche
-    genre_y = 534  # Position verticale
-    font_genre = Font.poppins(size=30, variant="bold")
+    # 1. TITRE
+    title_y = 60
+    for line in wrap_text(title, CONFIG["max_title_chars"]):
+        editor.text((60, title_y), line, font=font_title, color="white", align="left")
+        title_y += CONFIG["title_font_size"]
 
-    for genre in genres:
-        # Calculer la taille du texte
-        text_bbox = font_genre.getbbox(genre)
-        text_width = text_bbox[2] - text_bbox[0]
+    # 2. ANNEE + EPISODES
+    episode_text = f"{episode_count} EPISODE{'S' if episode_count != 'N/A' and episode_count > 1 else ''}" \
+                   if episode_count != "N/A" else "N/A ep."
+    title_y += 20
+    editor.text((60, title_y), f"{year} - {episode_text}",
+                font=font_year, color="white", align="left")
+    title_y += CONFIG["year_font_size"] + 20
 
-        # Définir les dimensions du rectangle
-        rect_width = text_width + 2 * 12  # Padding de 12 de chaque côté
-        rect_height = 40  # Hauteur fixe pour tous les rectangles
+    # 3. DESCRIPTION
+    short_desc = (description_raw[:CONFIG["max_description_chars"] - 3] + "...") \
+        if len(description_raw) > CONFIG["max_description_chars"] else description_raw
 
-        # Dessiner le rectangle
-        editor.rectangle(
-            (genre_x, genre_y),
-            width=rect_width,
-            height=rect_height,
-            fill=(200, 200, 200, 180),  # Gris semi-transparent
-            radius=22  # Bords arrondis
-        )
+    for line in wrap_text(short_desc, CONFIG["description_line_wrap"]):
+        editor.text((60, title_y), line, font=font_desc,
+                    color=(255, 255, 255, 180), align="left")
+        title_y += CONFIG["description_font_size"] + 6
 
-        # Calculer la position du texte pour le centrer
-        text_x = genre_x + (rect_width - text_width) / 2
-        text_y = genre_y + (rect_height / 2) - 12  # Centrer verticalement avec offset
-        
-        # Ajouter le texte
-        editor.text(
-            (text_x, text_y),
-            genre,
-            font=font_genre,
-            color="white",  # Blanc
-            align="left"
-        )
+    # 4. GENRES
+    title_y += 10
 
-        # Mettre à jour la position x pour le prochain genre
-        genre_x += rect_width + 8  # Espacement de 8 entre rectangles
+    def draw_genres(genres_list, start_x, start_y):
+        lines = [genres_list[i:i + CONFIG["genre_max_per_line"]]
+                 for i in range(0, len(genres_list), CONFIG["genre_max_per_line"])]
+        for line_idx, line in enumerate(lines):
+            x = start_x
+            y = start_y + line_idx * (CONFIG["genre_rect_height"] + 12)
+            for genre in line:
+                text_w = font_genre.getbbox(genre)[2]
+                rect_w = text_w + 24
+                editor.rectangle(
+                    (x, y),
+                    width=rect_w,
+                    height=CONFIG["genre_rect_height"],
+                    fill=(255, 111, 97, 180),
+                    radius=CONFIG["genre_radius"]
+                )
+                text_x = x + (rect_w - text_w) / 2
+                text_y = y + (CONFIG["genre_rect_height"] - CONFIG["genre_font_size"]) / 2
+                editor.text((text_x, text_y), genre, font=font_genre, color="white", align="left")
+                x += rect_w + CONFIG["genre_spacing"]
 
-    # Sauvegarder l'image
+    draw_genres(genres[:6], 60, title_y)
+
+    # --- Sauvegarde --- #
+
     editor.save(f"media/banner_anime_{anime_id}.png")
 
-# Exemple d'utilisation
+# --- EXECUTION --- #
+
 if __name__ == "__main__":
-    #anime_id = 21
-    for anime_id in [21, 23]:
-    #for anime_id in [23, 3250, 2519, 11209, 5646]:
+    anime_ids = [23, 3250, 2519, 11209, 5646]
+    for anime_id in anime_ids:
         generate_banner(anime_id)
-    print("Finish")
+        print("Generate anime media " + str(anime_id))
+    print("Generate finished !")
